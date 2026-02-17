@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 import { getProjectDir, getProjectWorkspaceDir } from "@/lib/claude/paths";
 
 export interface ScaffoldResult {
@@ -54,6 +55,60 @@ export function scaffoldProject(projectName: string): ScaffoldResult {
     return {
       projectDir,
       workspaceDir,
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Install the Everything Claude Code (ECC) plugin into a project workspace.
+ * This is a one-time operation per project. All subsequent agent sessions
+ * automatically load ECC from .claude/plugins/.
+ */
+export async function installECC(workspaceDir: string): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  try {
+    // 1. Enable plugins in the workspace config
+    execSync("claude config set --project pluginsEnabled true", {
+      cwd: workspaceDir,
+      stdio: "pipe",
+      timeout: 30000,
+    });
+
+    // 2. Add ECC from marketplace
+    execSync(
+      "claude /plugin marketplace add affaan-m/everything-claude-code",
+      { cwd: workspaceDir, stdio: "pipe", timeout: 60000 },
+    );
+
+    // 3. Install the plugin
+    execSync(
+      "claude /plugin install everything-claude-code@everything-claude-code",
+      { cwd: workspaceDir, stdio: "pipe", timeout: 60000 },
+    );
+
+    // 4. Verify installation — check plugin directory exists
+    const pluginDir = path.join(
+      workspaceDir,
+      ".claude",
+      "plugins",
+      "everything-claude-code",
+    );
+    if (!fs.existsSync(pluginDir)) {
+      return {
+        success: false,
+        error:
+          "Plugin directory not found after installation. ECC may not have installed correctly.",
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    // ECC installation is optional — agents can still work without it
+    return {
       success: false,
       error: error instanceof Error ? error.message : String(error),
     };

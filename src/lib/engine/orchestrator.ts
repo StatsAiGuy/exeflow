@@ -12,6 +12,14 @@ import {
 } from "./loop-controller";
 import { startChatBridge, stopChatBridge } from "./chat-bridge";
 import { createCheckpoint, getPendingCheckpoints } from "./checkpoint";
+import {
+  buildLeadAgentPrompt,
+  buildExecutorPrompt,
+  buildReviewerPrompt,
+  buildTesterPrompt,
+  buildProposePrompt,
+  buildPlanPrompt,
+} from "./prompt-builder";
 import { LeadDecisionSchema } from "@/lib/claude/output-schemas";
 import type { OrchestratorState } from "@/types/events";
 import type { Project, ModelConfig } from "@/types/project";
@@ -141,7 +149,9 @@ export class Orchestrator {
   }
 
   private async invokeLeadAgent(state: ReturnType<typeof getLoopState> & object): Promise<LeadDecision | null> {
-    const prompt = this.buildLeadPrompt(state);
+    const contextJson = state.contextJson ? JSON.parse(state.contextJson) : {};
+    contextJson.cycleNumber = state.cycleNumber;
+    const prompt = buildLeadAgentPrompt(this.project, state.planJson, contextJson);
 
     const result = await spawnAgent({
       role: "lead",
@@ -218,11 +228,26 @@ export class Orchestrator {
     // Create execution cycle if needed
     const cycleId = this.ensureCycle(state, phase);
 
+    // Build phase-specific prompt from template
+    const contextJson = state.contextJson ? JSON.parse(state.contextJson) : {};
+    const taskDescription = decision.task_description || "";
+    const retryCount = contextJson.retryCount ?? 0;
+    let prompt: string;
+
+    if (phase === "review") {
+      prompt = buildReviewerPrompt(this.project, taskDescription, contextJson.lastPhaseOutcome);
+    } else if (phase === "test") {
+      const isBootstrap = state.cycleNumber === 0;
+      prompt = buildTesterPrompt(this.project, taskDescription, isBootstrap);
+    } else {
+      prompt = buildExecutorPrompt(this.project, taskDescription, decision, retryCount);
+    }
+
     const result = await spawnAgent({
       role: decision.agent_role === "reviewer" ? "reviewer" : decision.agent_role === "tester" ? "tester" : "executor",
       phase: phase,
       model,
-      prompt: decision.task_description || "",
+      prompt,
       cwd: this.project.projectPath,
       maxTurns: decision.max_turns || 30,
       projectId: this.project.id,
@@ -258,11 +283,18 @@ export class Orchestrator {
   ): Promise<void> {
     this.transitionTo("planning");
 
+    const prompt = buildPlanPrompt(
+      this.project,
+      state.planJson,
+      "replan",
+      decision.failed_approaches,
+    );
+
     const result = await spawnAgent({
       role: "planner",
       phase: "plan",
       model: getModelForRole("lead", this.project.modelConfig),
-      prompt: `Replan needed: ${decision.replan_reason}\nDirection: ${decision.replan_direction}\nFailed approaches: ${decision.failed_approaches?.join("; ")}`,
+      prompt,
       cwd: this.project.projectPath,
       maxTurns: 15,
       projectId: this.project.id,
@@ -371,20 +403,6 @@ export class Orchestrator {
       result.duration,
       Date.now(),
     );
-  }
-
-  private buildLeadPrompt(state: NonNullable<ReturnType<typeof getLoopState>>): string {
-    const context = state.contextJson ? JSON.parse(state.contextJson) : {};
-
-    return `You are the lead orchestrator for project "${this.project.name}".
-Project description: ${this.project.description}
-Current cycle: ${state.cycleNumber}
-Current plan: ${state.planJson || "No plan yet"}
-Last phase: ${context.lastPhase || "none"}
-Last outcome: ${JSON.stringify(context.lastPhaseOutcome || "none")}
-Invocation trigger: ${context.invocationTrigger || (state.cycleNumber === 0 ? "INITIAL" : "AFTER_EXECUTE")}
-
-Make your decision as JSON.`;
   }
 
   private transitionTo(newState: OrchestratorState): void {
