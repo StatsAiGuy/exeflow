@@ -1,5 +1,6 @@
 import path from "path";
 import os from "os";
+import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 
 const DANGEROUS_BASH_PATTERNS = [
   /rm\s+-rf\s+[\/~]/,
@@ -11,7 +12,7 @@ const DANGEROUS_BASH_PATTERNS = [
   /chmod\s+777/,
   /mkfs/,
   /dd\s+if=/,
-  /:\(\)\s*\{\s*:\|:\&\s*\}/,  // fork bomb
+  /:\(\)\s*\{\s*:\|:\&\s*\}/, // fork bomb
 ];
 
 const EXEFLOW_DIR = path.join(os.homedir(), ".exeflow");
@@ -29,19 +30,33 @@ function isProtectedPath(filePath: string): boolean {
   return false;
 }
 
+/**
+ * Permission enforcement callback compatible with the Claude Agent SDK's CanUseTool signature.
+ * Returns a PermissionResult (allow/deny) for each tool call.
+ */
 export function enforceExeflowPermissions(
   toolName: string,
   toolInput: Record<string, unknown>,
   cwd: string,
-): boolean {
+): PermissionResult {
   // Write/Edit: block writes outside workspace and to protected dirs
   if (toolName === "Write" || toolName === "Edit") {
-    const filePath = (toolInput.file_path || toolInput.filePath) as string | undefined;
-    if (!filePath) return true;
+    const filePath = (toolInput.file_path || toolInput.filePath) as
+      | string
+      | undefined;
+    if (!filePath) return { behavior: "allow" };
 
-    if (isProtectedPath(filePath)) return false;
-    if (isPathOutsideWorkspace(filePath, cwd)) return false;
-    return true;
+    if (isProtectedPath(filePath))
+      return {
+        behavior: "deny",
+        message: `Cannot write to protected path: ${filePath}`,
+      };
+    if (isPathOutsideWorkspace(filePath, cwd))
+      return {
+        behavior: "deny",
+        message: `Cannot write outside workspace: ${filePath}`,
+      };
+    return { behavior: "allow" };
   }
 
   // Bash: block dangerous commands
@@ -49,25 +64,39 @@ export function enforceExeflowPermissions(
     const command = (toolInput.command || "") as string;
 
     for (const pattern of DANGEROUS_BASH_PATTERNS) {
-      if (pattern.test(command)) return false;
+      if (pattern.test(command))
+        return {
+          behavior: "deny",
+          message: `Dangerous command blocked: ${command.slice(0, 100)}`,
+        };
     }
 
-    return true;
+    return { behavior: "allow" };
   }
 
   // Read/Glob/Grep: block reading protected dirs
   if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") {
     const filePath = (toolInput.file_path || toolInput.path || "") as string;
-    if (filePath && isProtectedPath(filePath)) return false;
+    if (filePath && isProtectedPath(filePath))
+      return {
+        behavior: "deny",
+        message: `Cannot read protected path: ${filePath}`,
+      };
 
     // Allow reading credentials.json only if it's in the workspace
-    if (filePath.includes("credentials.json") && isPathOutsideWorkspace(filePath, cwd)) {
-      return false;
+    if (
+      filePath.includes("credentials.json") &&
+      isPathOutsideWorkspace(filePath, cwd)
+    ) {
+      return {
+        behavior: "deny",
+        message: "Cannot read credentials outside workspace",
+      };
     }
 
-    return true;
+    return { behavior: "allow" };
   }
 
   // All other tools: allow
-  return true;
+  return { behavior: "allow" };
 }

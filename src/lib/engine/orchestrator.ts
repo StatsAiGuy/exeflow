@@ -10,11 +10,12 @@ import {
   pauseLoop,
   completeLoop,
 } from "./loop-controller";
+import { startChatBridge, stopChatBridge } from "./chat-bridge";
 import { createCheckpoint, getPendingCheckpoints } from "./checkpoint";
 import { LeadDecisionSchema } from "@/lib/claude/output-schemas";
 import type { OrchestratorState } from "@/types/events";
 import type { Project, ModelConfig } from "@/types/project";
-import type { Phase } from "@/types/agent";
+import type { Phase, AgentResult } from "@/types/agent";
 
 export interface OrchestratorOptions {
   project: Project;
@@ -72,6 +73,9 @@ export class Orchestrator {
     if (this.running) return;
     this.running = true;
 
+    // Start chat bridge so agent activity appears in the chat panel
+    startChatBridge();
+
     // Check for existing state (session recovery)
     let loopState = getLoopState(this.project.id);
     if (!loopState) {
@@ -98,6 +102,7 @@ export class Orchestrator {
   stop(): void {
     this.running = false;
     this.abortController.abort();
+    stopChatBridge();
   }
 
   private async runLoop(): Promise<void> {
@@ -151,15 +156,25 @@ export class Orchestrator {
       cycleId: undefined,
     });
 
-    if (result.status === "failed" || !result.output) {
+    if (result.status === "failed") {
+      this.logError("lead_agent_failed", this.extractErrorMessage(result));
       return null;
     }
 
-    try {
-      return result.output as LeadDecision;
-    } catch {
+    if (!result.output) {
+      this.logError("lead_agent_empty", "Lead agent returned no output");
       return null;
     }
+
+    // With outputFormat + json_schema, the SDK guarantees valid JSON
+    // but we still guard against unexpected shapes
+    const output = result.output as Record<string, unknown>;
+    if (!output.action || !output.reasoning) {
+      this.logError("lead_agent_invalid", `Missing required fields in lead output: ${JSON.stringify(output).slice(0, 500)}`);
+      return null;
+    }
+
+    return output as unknown as LeadDecision;
   }
 
   private async processDecision(
@@ -217,13 +232,23 @@ export class Orchestrator {
     // Record phase result
     this.recordPhaseResult(phase, decision.task_description || "", result);
 
+    // Build outcome context including error details when applicable
+    const outcomeContext: Record<string, unknown> = {
+      lastPhase: phase,
+      lastPhaseOutcome: result.output,
+      lastAgentStatus: result.status,
+      lastAgentDuration: result.duration,
+      lastAgentTokens: { input: result.tokensInput, output: result.tokensOutput },
+    };
+
+    // If the agent failed, extract actionable error info for the lead agent
+    if (result.status === "failed") {
+      outcomeContext.errorMessage = this.extractErrorMessage(result);
+    }
+
     // Update context for next lead agent invocation
     setLoopState(this.project.id, "checkpoint", {
-      contextJson: JSON.stringify({
-        lastPhase: phase,
-        lastPhaseOutcome: result.output,
-        lastAgentStatus: result.status,
-      }),
+      contextJson: JSON.stringify(outcomeContext),
     });
   }
 
@@ -252,6 +277,10 @@ export class Orchestrator {
           invocationTrigger: "AFTER_REPLAN",
         }),
       });
+    } else {
+      // Replan failed — pause with error context so user can intervene
+      this.logError("replan_failed", this.extractErrorMessage(result));
+      pauseLoop(this.project.id, "paused_error");
     }
   }
 
@@ -370,6 +399,37 @@ Make your decision as JSON.`;
 
   private isPausedState(state: OrchestratorState): boolean {
     return state.startsWith("paused_");
+  }
+
+  /**
+   * Extract a human-readable error message from a failed agent result.
+   * The SDK returns structured error info in the output when a session fails.
+   */
+  private extractErrorMessage(result: AgentResult): string {
+    if (!result.output) return "Unknown error (no output)";
+
+    const output = result.output as Record<string, unknown>;
+
+    // SDK error structure: { error: "error_type", errors: [...], permissionDenials: [...] }
+    if (output.error) {
+      const errors = Array.isArray(output.errors) ? output.errors : [];
+      const errorType = String(output.error);
+
+      switch (errorType) {
+        case "error_max_turns":
+          return `Agent exceeded max turns limit. Errors: ${errors.join("; ") || "none"}`;
+        case "error_max_budget_usd":
+          return `Agent exceeded budget limit. Errors: ${errors.join("; ") || "none"}`;
+        case "error_max_structured_output_retries":
+          return `Agent failed to produce valid structured output after retries. Errors: ${errors.join("; ") || "none"}`;
+        case "error_during_execution":
+          return `Agent execution error: ${errors.join("; ") || "unknown"}`;
+        default:
+          return `Agent failed (${errorType}): ${errors.join("; ") || String(output.error)}`;
+      }
+    }
+
+    return JSON.stringify(output).slice(0, 500);
   }
 
   private logError(code: string, message: string): void {

@@ -1,4 +1,12 @@
+import { z } from "zod";
+import {
+  createSdkMcpServer,
+  tool,
+  type McpSdkServerConfigWithInstance,
+} from "@anthropic-ai/claude-agent-sdk";
 import { getDb } from "@/lib/db";
+import { generateId } from "@/lib/utils/id";
+import { eventBus } from "@/lib/events/emitter";
 
 /**
  * In-process MCP server for exeflow.
@@ -7,22 +15,59 @@ import { getDb } from "@/lib/db";
  * - exeflow_status: Query current project state, cycle, phase
  * - exeflow_checkpoint: Request a user checkpoint with question and options
  *
- * This server is passed to agent sessions via createSdkMcpServer() from the Agent SDK,
- * running in the same process with zero IPC overhead.
+ * Uses the Agent SDK's createSdkMcpServer() for zero-IPC overhead.
  */
 
-export interface McpTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
+let cachedServer: McpSdkServerConfigWithInstance | null = null;
+
+export function getExeflowMcpServer(): McpSdkServerConfigWithInstance {
+  if (cachedServer) return cachedServer;
+
+  cachedServer = createSdkMcpServer({
+    name: "exeflow-internal",
+    version: "1.0.0",
+    tools: [
+      tool(
+        "exeflow_status",
+        "Get the current project status including cycle number, active phase, milestone progress, and recent events.",
+        {
+          project_id: z.string().describe("The project ID to query status for"),
+        },
+        async (args) => {
+          return handleStatus(args.project_id);
+        },
+      ),
+      tool(
+        "exeflow_checkpoint",
+        "Request a user checkpoint — pauses execution and asks the user a question. Use when you need human input for an architectural decision, approval, or clarification.",
+        {
+          project_id: z.string().describe("The project ID"),
+          checkpoint_type: z
+            .enum(["clarification", "approval", "decision"])
+            .describe("Type of checkpoint"),
+          question: z.string().describe("The question to ask the user"),
+          options: z
+            .array(z.string())
+            .optional()
+            .describe("Optional list of choices for the user"),
+          context: z
+            .string()
+            .optional()
+            .describe("Supporting context for the user"),
+        },
+        async (args) => {
+          return handleCheckpoint(args);
+        },
+      ),
+    ],
+  });
+
+  return cachedServer;
 }
 
-export interface McpToolCallResult {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-}
+// --- Tool Definitions for tests/backward-compat ---
 
-export const EXEFLOW_MCP_TOOLS: McpTool[] = [
+export const EXEFLOW_MCP_TOOLS = [
   {
     name: "exeflow_status",
     description:
@@ -74,17 +119,21 @@ export const EXEFLOW_MCP_TOOLS: McpTool[] = [
 ];
 
 /**
- * Handle an MCP tool call from an agent session.
+ * Handle tool calls directly (for testing and non-SDK usage).
  */
 export function handleToolCall(
   toolName: string,
   input: Record<string, unknown>,
-): McpToolCallResult {
+): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
   switch (toolName) {
-    case "exeflow_status":
-      return handleStatus(input.project_id as string);
-    case "exeflow_checkpoint":
-      return handleCheckpoint(input);
+    case "exeflow_status": {
+      const result = handleStatusSync(input.project_id as string);
+      return result;
+    }
+    case "exeflow_checkpoint": {
+      const result = handleCheckpointSync(input);
+      return result;
+    }
     default:
       return {
         content: [{ type: "text", text: `Unknown tool: ${toolName}` }],
@@ -93,7 +142,29 @@ export function handleToolCall(
   }
 }
 
-function handleStatus(projectId: string): McpToolCallResult {
+// --- Async handlers for SDK MCP tools ---
+
+async function handleStatus(
+  projectId: string,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  return handleStatusSync(projectId);
+}
+
+async function handleCheckpoint(args: {
+  project_id: string;
+  checkpoint_type: "clarification" | "approval" | "decision";
+  question: string;
+  options?: string[];
+  context?: string;
+}): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  return handleCheckpointSync(args as Record<string, unknown>);
+}
+
+// --- Sync implementations ---
+
+function handleStatusSync(
+  projectId: string,
+): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
   try {
     const db = getDb();
 
@@ -110,7 +181,6 @@ function handleStatus(projectId: string): McpToolCallResult {
       };
     }
 
-    // Get latest cycle
     const cycle = db
       .prepare(
         `SELECT cycle_number, phase, status FROM execution_cycles
@@ -118,7 +188,6 @@ function handleStatus(projectId: string): McpToolCallResult {
       )
       .get(projectId) as Record<string, unknown> | undefined;
 
-    // Get milestone progress
     const milestones = db
       .prepare(
         `SELECT status, COUNT(*) as count FROM milestones
@@ -126,7 +195,6 @@ function handleStatus(projectId: string): McpToolCallResult {
       )
       .all(projectId) as Array<{ status: string; count: number }>;
 
-    // Get pending checkpoints
     const pendingCheckpoints = db
       .prepare(
         `SELECT COUNT(*) as count FROM checkpoints
@@ -134,7 +202,6 @@ function handleStatus(projectId: string): McpToolCallResult {
       )
       .get(projectId) as { count: number };
 
-    // Get active agents
     const activeAgents = db
       .prepare(
         `SELECT COUNT(*) as count FROM agents
@@ -177,11 +244,11 @@ function handleStatus(projectId: string): McpToolCallResult {
   }
 }
 
-function handleCheckpoint(input: Record<string, unknown>): McpToolCallResult {
+function handleCheckpointSync(
+  input: Record<string, unknown>,
+): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
   try {
     const db = getDb();
-    const { generateId } = require("@/lib/utils/id") as { generateId: () => string };
-
     const checkpointId = generateId();
 
     db.prepare(
@@ -198,10 +265,6 @@ function handleCheckpoint(input: Record<string, unknown>): McpToolCallResult {
       }),
     );
 
-    // Emit event for SSE
-    const { eventBus } = require("@/lib/events/emitter") as {
-      eventBus: { emit: (type: string, projectId: string, data: unknown) => void };
-    };
     eventBus.emit("checkpoint_created", input.project_id as string, {
       checkpointId,
       type: input.checkpoint_type,
@@ -232,18 +295,4 @@ function handleCheckpoint(input: Record<string, unknown>): McpToolCallResult {
       isError: true,
     };
   }
-}
-
-/**
- * Create the MCP server configuration object for use with the Agent SDK.
- *
- * Usage with Agent SDK:
- *   import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
- *   const mcpConfig = createSdkMcpServer(createExeflowMcpServerImpl());
- */
-export function getExeflowMcpConfig() {
-  return {
-    tools: EXEFLOW_MCP_TOOLS,
-    handleToolCall,
-  };
 }

@@ -36,7 +36,7 @@ export interface AgentSpawnOptions {
   allowedTools?: string[];
   maxTurns?: number;
   mcpServers?: Record<string, McpServerConfig>;
-  outputSchema?: object;
+  outputSchema?: Record<string, unknown>;
   projectId: string;
   cycleId?: string;
   parentAgentId?: string;
