@@ -1,0 +1,382 @@
+import { getDb, withRetry } from "@/lib/db";
+import { generateId } from "@/lib/utils/id";
+import { eventBus } from "@/lib/events/emitter";
+import { detectLoop } from "@/lib/quality/loop-detector";
+import { spawnAgent } from "@/lib/claude/sdk";
+import { getModelForRole, resolveModelShorthand } from "./model-delegator";
+import {
+  getLoopState,
+  setLoopState,
+  pauseLoop,
+  completeLoop,
+} from "./loop-controller";
+import { createCheckpoint, getPendingCheckpoints } from "./checkpoint";
+import { LeadDecisionSchema } from "@/lib/claude/output-schemas";
+import type { OrchestratorState } from "@/types/events";
+import type { Project, ModelConfig } from "@/types/project";
+import type { Phase } from "@/types/agent";
+
+export interface OrchestratorOptions {
+  project: Project;
+  planJson: string;
+  onStateChange?: (state: OrchestratorState) => void;
+}
+
+interface LeadDecision {
+  action: "execute_task" | "replan" | "checkpoint" | "complete" | "skip_task";
+  task_id?: string;
+  task_description?: string;
+  milestone_id?: string;
+  agent_role?: string;
+  phase?: Phase;
+  model?: string;
+  complexity?: string;
+  expected_files?: string[];
+  parallel_eligible?: boolean;
+  retry_context?: string | null;
+  previous_review_feedback?: string | null;
+  previous_test_errors?: string | null;
+  max_turns?: number;
+  replan_reason?: string;
+  replan_direction?: string;
+  preserve_completed?: boolean;
+  failed_approaches?: string[];
+  checkpoint_type?: string;
+  question?: string;
+  options?: string[];
+  recommendation?: string | null;
+  context?: string;
+  completion_scope?: string;
+  summary?: string;
+  next_milestone_id?: string | null;
+  skip_reason?: string;
+  reasoning: string;
+  confidence: string;
+}
+
+export class Orchestrator {
+  private project: Project;
+  private planJson: string;
+  private abortController: AbortController;
+  private running = false;
+  private onStateChange?: (state: OrchestratorState) => void;
+
+  constructor(options: OrchestratorOptions) {
+    this.project = options.project;
+    this.planJson = options.planJson;
+    this.abortController = new AbortController();
+    this.onStateChange = options.onStateChange;
+  }
+
+  async start(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+
+    // Check for existing state (session recovery)
+    let loopState = getLoopState(this.project.id);
+    if (!loopState) {
+      setLoopState(this.project.id, "initializing", {
+        cycleNumber: 0,
+        planJson: this.planJson,
+      });
+      loopState = getLoopState(this.project.id)!;
+    }
+
+    this.transitionTo(loopState.state);
+
+    try {
+      await this.runLoop();
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      this.logError("orchestrator_crash", errMsg);
+      pauseLoop(this.project.id, "paused_error");
+    } finally {
+      this.running = false;
+    }
+  }
+
+  stop(): void {
+    this.running = false;
+    this.abortController.abort();
+  }
+
+  private async runLoop(): Promise<void> {
+    while (this.running && !this.abortController.signal.aborted) {
+      const state = getLoopState(this.project.id);
+      if (!state) break;
+
+      // Check if paused or terminal
+      if (this.isTerminalState(state.state) || this.isPausedState(state.state)) {
+        break;
+      }
+
+      // Check for loops
+      const loopDetection = detectLoop(this.project.id);
+      if (loopDetection.detected) {
+        pauseLoop(this.project.id, "paused_loop_detected");
+        createCheckpoint(
+          this.project.id,
+          "clarification",
+          `Loop detected (${loopDetection.type}): ${loopDetection.evidence}. How should I proceed?`,
+          { loopType: loopDetection.type, evidence: loopDetection.evidence },
+        );
+        break;
+      }
+
+      // Invoke lead agent to decide next action
+      const decision = await this.invokeLeadAgent(state);
+      if (!decision) {
+        pauseLoop(this.project.id, "paused_error");
+        break;
+      }
+
+      // Act on decision
+      await this.processDecision(decision, state);
+    }
+  }
+
+  private async invokeLeadAgent(state: ReturnType<typeof getLoopState> & object): Promise<LeadDecision | null> {
+    const prompt = this.buildLeadPrompt(state);
+
+    const result = await spawnAgent({
+      role: "lead",
+      phase: "plan",
+      model: getModelForRole("lead", this.project.modelConfig),
+      prompt,
+      cwd: this.project.projectPath,
+      maxTurns: 5,
+      allowedTools: ["Read", "Glob", "Grep"],
+      outputSchema: LeadDecisionSchema,
+      projectId: this.project.id,
+      cycleId: undefined,
+    });
+
+    if (result.status === "failed" || !result.output) {
+      return null;
+    }
+
+    try {
+      return result.output as LeadDecision;
+    } catch {
+      return null;
+    }
+  }
+
+  private async processDecision(
+    decision: LeadDecision,
+    state: NonNullable<ReturnType<typeof getLoopState>>,
+  ): Promise<void> {
+    switch (decision.action) {
+      case "execute_task":
+        await this.handleExecuteTask(decision, state);
+        break;
+      case "replan":
+        await this.handleReplan(decision, state);
+        break;
+      case "checkpoint":
+        this.handleCheckpoint(decision);
+        break;
+      case "complete":
+        this.handleComplete(decision);
+        break;
+      case "skip_task":
+        this.handleSkipTask(decision);
+        break;
+    }
+  }
+
+  private async handleExecuteTask(
+    decision: LeadDecision,
+    state: NonNullable<ReturnType<typeof getLoopState>>,
+  ): Promise<void> {
+    const phase = decision.phase || "execute";
+    const model = decision.model
+      ? resolveModelShorthand(decision.model as "opus" | "haiku" | "sonnet")
+      : getModelForRole(
+          "executor",
+          this.project.modelConfig,
+          decision.complexity as "simple" | "complex",
+        );
+
+    this.transitionTo(phase === "execute" ? "executing" : phase === "review" ? "reviewing" : "testing");
+
+    // Create execution cycle if needed
+    const cycleId = this.ensureCycle(state, phase);
+
+    const result = await spawnAgent({
+      role: decision.agent_role === "reviewer" ? "reviewer" : decision.agent_role === "tester" ? "tester" : "executor",
+      phase: phase,
+      model,
+      prompt: decision.task_description || "",
+      cwd: this.project.projectPath,
+      maxTurns: decision.max_turns || 30,
+      projectId: this.project.id,
+      cycleId,
+    });
+
+    // Record phase result
+    this.recordPhaseResult(phase, decision.task_description || "", result);
+
+    // Update context for next lead agent invocation
+    setLoopState(this.project.id, "checkpoint", {
+      contextJson: JSON.stringify({
+        lastPhase: phase,
+        lastPhaseOutcome: result.output,
+        lastAgentStatus: result.status,
+      }),
+    });
+  }
+
+  private async handleReplan(
+    decision: LeadDecision,
+    state: NonNullable<ReturnType<typeof getLoopState>>,
+  ): Promise<void> {
+    this.transitionTo("planning");
+
+    const result = await spawnAgent({
+      role: "planner",
+      phase: "plan",
+      model: getModelForRole("lead", this.project.modelConfig),
+      prompt: `Replan needed: ${decision.replan_reason}\nDirection: ${decision.replan_direction}\nFailed approaches: ${decision.failed_approaches?.join("; ")}`,
+      cwd: this.project.projectPath,
+      maxTurns: 15,
+      projectId: this.project.id,
+    });
+
+    if (result.status === "completed" && result.output) {
+      setLoopState(this.project.id, "checkpoint", {
+        planJson: JSON.stringify(result.output),
+        contextJson: JSON.stringify({
+          lastPhase: "plan",
+          lastPhaseOutcome: result.output,
+          invocationTrigger: "AFTER_REPLAN",
+        }),
+      });
+    }
+  }
+
+  private handleCheckpoint(decision: LeadDecision): void {
+    createCheckpoint(
+      this.project.id,
+      (decision.checkpoint_type || "clarification") as "clarification" | "approval" | "review" | "decision",
+      decision.question || "Agent needs input",
+      {
+        options: decision.options,
+        recommendation: decision.recommendation,
+        context: decision.context,
+      },
+    );
+
+    pauseLoop(this.project.id, "paused_awaiting_input");
+  }
+
+  private handleComplete(decision: LeadDecision): void {
+    if (decision.completion_scope === "project") {
+      completeLoop(this.project.id);
+    } else {
+      // Milestone complete, continue to next
+      setLoopState(this.project.id, "checkpoint", {
+        contextJson: JSON.stringify({
+          lastPhase: "propose",
+          lastPhaseOutcome: { milestoneComplete: true, summary: decision.summary },
+          invocationTrigger: "AFTER_PROPOSE",
+          nextMilestoneId: decision.next_milestone_id,
+        }),
+      });
+    }
+  }
+
+  private handleSkipTask(decision: LeadDecision): void {
+    if (decision.task_id) {
+      const db = getDb();
+      db.prepare(
+        "UPDATE tasks SET status = 'skipped', updated_at = datetime('now') WHERE id = ?",
+      ).run(decision.task_id);
+    }
+
+    // Continue loop — lead agent will pick next task
+    setLoopState(this.project.id, "checkpoint", {
+      contextJson: JSON.stringify({
+        lastPhase: "skip",
+        lastPhaseOutcome: { skippedTaskId: decision.task_id, reason: decision.skip_reason },
+      }),
+    });
+  }
+
+  private ensureCycle(
+    state: NonNullable<ReturnType<typeof getLoopState>>,
+    phase: string,
+  ): string {
+    const db = getDb();
+    const cycleId = generateId();
+
+    db.prepare(
+      `INSERT INTO execution_cycles (id, project_id, cycle_number, phase, status, started_at)
+       VALUES (?, ?, ?, ?, 'running', datetime('now'))`,
+    ).run(cycleId, this.project.id, state.cycleNumber, phase);
+
+    eventBus.emit("cycle_started", this.project.id, {
+      cycleId,
+      cycleNumber: state.cycleNumber,
+      phase,
+    });
+
+    return cycleId;
+  }
+
+  private recordPhaseResult(
+    phase: string,
+    taskDescription: string,
+    result: { status: string; output: unknown; duration: number },
+  ): void {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO phase_history (id, project_id, phase_name, task_description, outcome, duration_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      generateId(),
+      this.project.id,
+      phase,
+      taskDescription.slice(0, 500),
+      result.status === "completed" ? "success" : "failure",
+      result.duration,
+      Date.now(),
+    );
+  }
+
+  private buildLeadPrompt(state: NonNullable<ReturnType<typeof getLoopState>>): string {
+    const context = state.contextJson ? JSON.parse(state.contextJson) : {};
+
+    return `You are the lead orchestrator for project "${this.project.name}".
+Project description: ${this.project.description}
+Current cycle: ${state.cycleNumber}
+Current plan: ${state.planJson || "No plan yet"}
+Last phase: ${context.lastPhase || "none"}
+Last outcome: ${JSON.stringify(context.lastPhaseOutcome || "none")}
+Invocation trigger: ${context.invocationTrigger || (state.cycleNumber === 0 ? "INITIAL" : "AFTER_EXECUTE")}
+
+Make your decision as JSON.`;
+  }
+
+  private transitionTo(newState: OrchestratorState): void {
+    setLoopState(this.project.id, newState);
+    this.onStateChange?.(newState);
+    eventBus.emit("phase_started", this.project.id, { state: newState });
+  }
+
+  private isTerminalState(state: OrchestratorState): boolean {
+    return state === "completed" || state === "abandoned";
+  }
+
+  private isPausedState(state: OrchestratorState): boolean {
+    return state.startsWith("paused_");
+  }
+
+  private logError(code: string, message: string): void {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO error_log (id, project_id, category, severity, code, message, context_json, created_at)
+       VALUES (?, ?, 'agent_session', 'error', ?, ?, '{}', ?)`,
+    ).run(generateId(), this.project.id, code, message, Date.now());
+  }
+}
