@@ -6,18 +6,27 @@ import { initializeDb } from "@/lib/db";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { apiKey, machineSpecs, github, notifications } = body;
+    const { authMode, apiKey, maxAuth, machineSpecs, github, notifications } = body;
 
     // Ensure DB is initialized
     initializeDb();
 
-    // Save API key to encrypted credentials
-    if (apiKey) {
+    // Save auth configuration
+    if (authMode === "apikey" && apiKey) {
       setCredential("anthropic", "api_key", apiKey);
     }
 
     // Update config
     const config = readConfig();
+
+    // Save auth mode
+    config.authMode = authMode || "apikey";
+    if (maxAuth) {
+      config.maxSubscription = {
+        email: maxAuth.email,
+        subscriptionType: maxAuth.subscriptionType,
+      };
+    }
 
     if (machineSpecs) {
       config.machineSpecs = machineSpecs;

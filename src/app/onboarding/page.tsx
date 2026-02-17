@@ -70,11 +70,23 @@ export default function OnboardingPage() {
   const router = useRouter();
   const [step, setStep] = useState(0);
 
+  // Auth mode: "apikey" or "max"
+  const [authMode, setAuthMode] = useState<"apikey" | "max" | null>(null);
+
   // API Key state
   const [apiKey, setApiKey] = useState("");
   const [validatingKey, setValidatingKey] = useState(false);
   const [keyValid, setKeyValid] = useState(false);
   const [keyError, setKeyError] = useState("");
+
+  // Max subscription state
+  const [checkingMax, setCheckingMax] = useState(false);
+  const [maxAuth, setMaxAuth] = useState<{
+    authenticated: boolean;
+    email?: string;
+    subscriptionType?: string;
+  } | null>(null);
+  const [maxError, setMaxError] = useState("");
 
   // Machine specs state
   const [machineSpecs, setMachineSpecs] = useState<MachineSpecs | null>(null);
@@ -104,6 +116,28 @@ export default function OnboardingPage() {
   const [saving, setSaving] = useState(false);
 
   const progress = ((step + 1) / STEPS.length) * 100;
+
+  const checkMaxAuth = useCallback(async () => {
+    setCheckingMax(true);
+    setMaxError("");
+    try {
+      const res = await fetch("/api/onboarding/check-claude-auth", {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (data.authenticated) {
+        setMaxAuth(data);
+        setKeyValid(true);
+        setStep(2);
+      } else {
+        setMaxError(data.error || "Claude Code is not authenticated");
+      }
+    } catch {
+      setMaxError("Failed to check Claude Code auth");
+    } finally {
+      setCheckingMax(false);
+    }
+  }, []);
 
   const validateApiKey = useCallback(async () => {
     setValidatingKey(true);
@@ -215,7 +249,9 @@ export default function OnboardingPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          apiKey,
+          authMode,
+          apiKey: authMode === "apikey" ? apiKey : undefined,
+          maxAuth: authMode === "max" ? maxAuth : undefined,
           machineSpecs,
           github:
             githubOrg && githubToken
@@ -234,7 +270,7 @@ export default function OnboardingPage() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, machineSpecs, githubOrg, githubToken, discordWebhook, slackWebhook, router]);
+  }, [authMode, apiKey, maxAuth, machineSpecs, githubOrg, githubToken, discordWebhook, slackWebhook, router]);
 
   function formatBytes(mb: number): string {
     if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -266,7 +302,7 @@ export default function OnboardingPage() {
               <div className="rounded-lg border bg-muted/30 p-4 text-sm space-y-2">
                 <p className="font-medium">What you will need:</p>
                 <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
-                  <li>Claude API key (required)</li>
+                  <li>Claude Max subscription or API key</li>
                   <li>GitHub account (recommended)</li>
                   <li>A project idea</li>
                 </ul>
@@ -277,63 +313,155 @@ export default function OnboardingPage() {
             </>
           )}
 
-          {/* Step 1: API Key */}
+          {/* Step 1: Authentication */}
           {step === 1 && (
             <>
-              <CardDescription>
-                Enter your Anthropic API key. This powers all agent sessions.
-              </CardDescription>
-              <div className="space-y-2">
-                <Label htmlFor="apiKey">API Key</Label>
-                <Input
-                  id="apiKey"
-                  type="password"
-                  placeholder="sk-ant-..."
-                  value={apiKey}
-                  onChange={(e) => {
-                    setApiKey(e.target.value);
-                    setKeyValid(false);
-                    setKeyError("");
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && apiKey) validateApiKey();
-                  }}
-                />
-                {keyError && (
-                  <p className="text-sm text-destructive flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" /> {keyError}
-                  </p>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  Get your key at{" "}
-                  <a
-                    href="https://console.anthropic.com/settings/keys"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline hover:text-foreground"
-                  >
-                    console.anthropic.com
-                    <ExternalLink className="inline ml-0.5 h-3 w-3" />
-                  </a>
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setStep(0)}>
-                  <ArrowLeft className="mr-2 h-4 w-4" /> Back
-                </Button>
-                <Button
-                  onClick={validateApiKey}
-                  disabled={!apiKey || validatingKey}
-                  className="flex-1"
-                >
-                  {validatingKey ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : keyValid ? (
-                    <CheckCircle className="mr-2 h-4 w-4" />
-                  ) : null}
-                  {validatingKey ? "Validating..." : keyValid ? "Validated" : "Validate"}
-                </Button>
-              </div>
+              {!authMode ? (
+                <>
+                  <CardDescription>
+                    Choose how to authenticate with Claude. Your Max subscription
+                    works directly — no separate API credits needed.
+                  </CardDescription>
+                  <div className="space-y-3">
+                    <button
+                      onClick={() => {
+                        setAuthMode("max");
+                        checkMaxAuth();
+                      }}
+                      className="w-full rounded-lg border-2 border-primary/50 bg-primary/5 p-4 text-left hover:bg-primary/10 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 font-medium text-sm">
+                        <CheckCircle className="h-4 w-4 text-primary" />
+                        Use Claude Subscription (Recommended)
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Uses your existing Claude Code login. No API key needed.
+                        Works with Pro, Max 5x, and Max 20x plans.
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => setAuthMode("apikey")}
+                      className="w-full rounded-lg border p-4 text-left hover:bg-muted/50 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 font-medium text-sm">
+                        <ExternalLink className="h-4 w-4 text-muted-foreground" />
+                        Use API Key
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Pay-as-you-go via console.anthropic.com. Separate from subscription.
+                      </p>
+                    </button>
+                  </div>
+                  <Button variant="outline" onClick={() => setStep(0)}>
+                    <ArrowLeft className="mr-2 h-4 w-4" /> Back
+                  </Button>
+                </>
+              ) : authMode === "max" ? (
+                <>
+                  <CardDescription>
+                    Checking your Claude Code authentication...
+                  </CardDescription>
+                  {checkingMax && (
+                    <div className="flex items-center justify-center py-6">
+                      <Loader2 className="h-6 w-6 animate-spin mr-3" />
+                      <span className="text-sm text-muted-foreground">
+                        Detecting Claude subscription...
+                      </span>
+                    </div>
+                  )}
+                  {maxAuth?.authenticated && (
+                    <div className="rounded-lg border border-green-500/50 bg-green-500/10 p-4 space-y-2">
+                      <div className="flex items-center gap-2 text-sm font-medium text-green-600 dark:text-green-400">
+                        <CheckCircle className="h-4 w-4" />
+                        Authenticated via {maxAuth.subscriptionType?.toUpperCase() || "Claude"} subscription
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Signed in as {maxAuth.email}
+                      </p>
+                    </div>
+                  )}
+                  {maxError && (
+                    <div className="space-y-2">
+                      <p className="text-sm text-destructive flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" /> {maxError}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Make sure Claude Code is installed and you are logged in.
+                        Run <code className="bg-muted px-1 rounded">claude login</code> in
+                        your terminal to authenticate.
+                      </p>
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => { setAuthMode(null); setMaxError(""); setMaxAuth(null); }}>
+                      <ArrowLeft className="mr-2 h-4 w-4" /> Back
+                    </Button>
+                    {maxError && (
+                      <Button onClick={checkMaxAuth} disabled={checkingMax} className="flex-1">
+                        {checkingMax && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        Retry
+                      </Button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <CardDescription>
+                    Enter your Anthropic API key. This powers all agent sessions.
+                  </CardDescription>
+                  <div className="space-y-2">
+                    <Label htmlFor="apiKey">API Key</Label>
+                    <Input
+                      id="apiKey"
+                      type="password"
+                      placeholder="sk-ant-..."
+                      value={apiKey}
+                      onChange={(e) => {
+                        setApiKey(e.target.value);
+                        setKeyValid(false);
+                        setKeyError("");
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && apiKey) validateApiKey();
+                      }}
+                    />
+                    {keyError && (
+                      <p className="text-sm text-destructive flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" /> {keyError}
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Get your key at{" "}
+                      <a
+                        href="https://console.anthropic.com/settings/keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline hover:text-foreground"
+                      >
+                        console.anthropic.com
+                        <ExternalLink className="inline ml-0.5 h-3 w-3" />
+                      </a>
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => { setAuthMode(null); setKeyError(""); }}>
+                      <ArrowLeft className="mr-2 h-4 w-4" /> Back
+                    </Button>
+                    <Button
+                      onClick={validateApiKey}
+                      disabled={!apiKey || validatingKey}
+                      className="flex-1"
+                    >
+                      {validatingKey ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : keyValid ? (
+                        <CheckCircle className="mr-2 h-4 w-4" />
+                      ) : null}
+                      {validatingKey ? "Validating..." : keyValid ? "Validated" : "Validate"}
+                    </Button>
+                  </div>
+                </>
+              )}
             </>
           )}
 
@@ -686,8 +814,12 @@ export default function OnboardingPage() {
               </div>
               <div className="rounded-lg border bg-muted/30 p-4 text-sm space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">API Key</span>
-                  <Badge variant="default">Configured</Badge>
+                  <span className="text-muted-foreground">Authentication</span>
+                  <Badge variant="default">
+                    {authMode === "max"
+                      ? `${maxAuth?.subscriptionType?.toUpperCase() || "Subscription"} (${maxAuth?.email || "connected"})`
+                      : "API Key"}
+                  </Badge>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Machine</span>

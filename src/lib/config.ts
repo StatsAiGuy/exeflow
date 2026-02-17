@@ -5,6 +5,11 @@ import { getConfigPath, getExeflowDataDir } from "@/lib/claude/paths";
 export interface ExeflowConfig {
   onboardingComplete: boolean;
   onboardingCompletedAt?: string;
+  authMode?: "apikey" | "max";
+  maxSubscription?: {
+    email?: string;
+    subscriptionType?: string;
+  };
   machineSpecs?: Record<string, unknown>;
   github?: {
     orgName: string;
