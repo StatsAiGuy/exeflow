@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import { generateId } from "@/lib/utils/id";
 import { answerCheckpoint } from "@/lib/engine/checkpoint";
 import { pauseLoop, resumeLoop } from "@/lib/engine/loop-controller";
 import {
@@ -273,7 +274,6 @@ function handleAsk(
     return { type: "error", content: `Project "${projectName}" not found.` };
   }
 
-  const { generateId } = require("@/lib/utils/id");
   db.prepare(
     `INSERT INTO chat_messages (id, project_id, role, content, message_type, created_at)
      VALUES (?, ?, 'user', ?, 'text', datetime('now'))`,

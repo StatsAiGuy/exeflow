@@ -7,6 +7,7 @@ export interface NotificationPayload {
   level: "info" | "warning" | "error" | "critical";
   actionRequired?: boolean;
   actionUrl?: string;
+  channelId?: string;
   data?: Record<string, unknown>;
 }
 

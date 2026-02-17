@@ -3,7 +3,7 @@ export const LeadDecisionSchema = {
   properties: {
     action: {
       type: "string" as const,
-      enum: ["execute_task", "replan", "checkpoint", "complete", "skip_task"],
+      enum: ["execute_task", "replan", "checkpoint", "complete", "skip_task", "propose"],
     },
     // execute_task fields
     task_id: { type: "string" as const },

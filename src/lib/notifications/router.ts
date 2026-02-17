@@ -1,6 +1,7 @@
 import { getDb, withRetry } from "@/lib/db";
 import { generateId } from "@/lib/utils/id";
 import { eventBus } from "@/lib/events/emitter";
+import { getDiscordBot } from "@/lib/discord/bot";
 import type { NotificationPayload, NotificationConfig } from "./types";
 
 // Rate limiting: track last notification per level
@@ -39,7 +40,9 @@ export class NotificationRouter {
       promises.push(this.sendWeb(payload));
     }
 
-    if (this.config.discord?.mode === "webhook" && this.config.discord.webhookUrl) {
+    if (this.config.discord?.mode === "bot") {
+      promises.push(this.sendDiscordBot(payload));
+    } else if (this.config.discord?.mode === "webhook" && this.config.discord.webhookUrl) {
       promises.push(this.sendDiscordWebhook(payload));
     }
 
@@ -80,6 +83,39 @@ export class NotificationRouter {
       level: payload.level,
       actionRequired: payload.actionRequired,
     });
+  }
+
+  private async sendDiscordBot(payload: NotificationPayload): Promise<void> {
+    const bot = getDiscordBot();
+    if (!bot?.isActive) return;
+
+    const colorMap = {
+      info: 0x3b82f6,
+      warning: 0xf59e0b,
+      error: 0xef4444,
+      critical: 0xdc2626,
+    };
+
+    const embed = {
+      title: payload.title,
+      description: payload.message,
+      color: colorMap[payload.level],
+      timestamp: new Date().toISOString(),
+    };
+
+    try {
+      if (payload.actionRequired) {
+        // Action-required notifications go to DM
+        await bot.sendDM(embed);
+      } else if (payload.channelId) {
+        await bot.sendEmbed(embed, payload.channelId);
+      } else {
+        // Fallback: send embed without channel (bot will use webhook fallback)
+        await bot.sendEmbed(embed);
+      }
+    } catch {
+      // Bot failures are non-critical
+    }
   }
 
   private async sendDiscordWebhook(payload: NotificationPayload): Promise<void> {

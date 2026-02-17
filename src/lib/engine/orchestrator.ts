@@ -32,7 +32,7 @@ export interface OrchestratorOptions {
 }
 
 interface LeadDecision {
-  action: "execute_task" | "replan" | "checkpoint" | "complete" | "skip_task";
+  action: "execute_task" | "replan" | "checkpoint" | "complete" | "skip_task" | "propose";
   task_id?: string;
   task_description?: string;
   milestone_id?: string;
@@ -207,6 +207,9 @@ export class Orchestrator {
       case "skip_task":
         this.handleSkipTask(decision);
         break;
+      case "propose":
+        await this.handlePropose(decision, state);
+        break;
     }
   }
 
@@ -335,12 +338,12 @@ export class Orchestrator {
     if (decision.completion_scope === "project") {
       completeLoop(this.project.id);
     } else {
-      // Milestone complete, continue to next
+      // Milestone complete — set context so lead agent can trigger propose
       setLoopState(this.project.id, "checkpoint", {
         contextJson: JSON.stringify({
-          lastPhase: "propose",
+          lastPhase: "complete_milestone",
           lastPhaseOutcome: { milestoneComplete: true, summary: decision.summary },
-          invocationTrigger: "AFTER_PROPOSE",
+          invocationTrigger: "AFTER_EXECUTE",
           nextMilestoneId: decision.next_milestone_id,
         }),
       });
@@ -362,6 +365,56 @@ export class Orchestrator {
         lastPhaseOutcome: { skippedTaskId: decision.task_id, reason: decision.skip_reason },
       }),
     });
+  }
+
+  private async handlePropose(
+    decision: LeadDecision,
+    state: NonNullable<ReturnType<typeof getLoopState>>,
+  ): Promise<void> {
+    this.transitionTo("proposing");
+
+    const contextJson = state.contextJson ? JSON.parse(state.contextJson) : {};
+    const prompt = buildProposePrompt(this.project, state.cycleNumber, contextJson);
+
+    const cycleId = this.ensureCycle(state, "propose");
+
+    const result = await spawnAgent({
+      role: "proposer",
+      phase: "propose",
+      model: getModelForRole("lead", this.project.modelConfig),
+      prompt,
+      cwd: this.project.projectPath,
+      maxTurns: 15,
+      projectId: this.project.id,
+      cycleId,
+    });
+
+    this.recordPhaseResult("propose", "Commit, push, and assess milestone", result);
+
+    if (result.status === "completed" && result.output) {
+      const output = result.output as Record<string, unknown>;
+
+      // Increment cycle number after a full propose cycle
+      const nextCycle = state.cycleNumber + 1;
+
+      if (output.project_complete) {
+        completeLoop(this.project.id);
+      } else {
+        setLoopState(this.project.id, "checkpoint", {
+          cycleNumber: nextCycle,
+          contextJson: JSON.stringify({
+            lastPhase: "propose",
+            lastPhaseOutcome: result.output,
+            invocationTrigger: "AFTER_PROPOSE",
+            nextMilestoneId: output.next_milestone_id,
+            milestoneComplete: output.milestone_complete,
+          }),
+        });
+      }
+    } else {
+      this.logError("propose_failed", this.extractErrorMessage(result));
+      pauseLoop(this.project.id, "paused_error");
+    }
   }
 
   private ensureCycle(

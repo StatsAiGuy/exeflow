@@ -1,7 +1,7 @@
 import { getProject } from "@/lib/projects/manager";
 import { Orchestrator } from "./orchestrator";
 import { startLoop, pauseLoop, resumeLoop, stopLoop, getLoopState } from "./loop-controller";
-import { scaffoldProject } from "@/lib/projects/scaffolder";
+import { scaffoldProject, installECC } from "@/lib/projects/scaffolder";
 import { generateClaudeMd } from "@/lib/config-gen/claude-md";
 import { generateSettingsJson } from "@/lib/config-gen/settings-gen";
 import { generateProjectStandardsRule, generateSecurityRule, generateExeflowConstraintsRule, generateTestingRule } from "@/lib/config-gen/rules-gen";
@@ -36,6 +36,19 @@ export async function startProject(projectId: string): Promise<{ success: boolea
 
   // Ensure Claude config exists in workspace
   ensureClaudeConfig(project);
+
+  // Install ECC plugin if not already present
+  const eccPluginDir = path.join(project.projectPath, ".claude", "plugins", "everything-claude-code");
+  if (!fs.existsSync(eccPluginDir)) {
+    const eccResult = await installECC(project.projectPath);
+    if (!eccResult.success) {
+      // ECC is optional — log but don't block
+      eventBus.emit("error", project.id, {
+        message: `ECC plugin installation failed: ${eccResult.error}. Agents will work without ECC.`,
+        severity: "warning",
+      });
+    }
+  }
 
   // Initialize the loop state
   startLoop(projectId);
