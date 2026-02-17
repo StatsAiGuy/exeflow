@@ -214,8 +214,8 @@ export const ResearchResultSchema = {
         type: "object" as const,
         properties: {
           name: { type: "string" as const },
-          mcp_package: { type: "string" as const },
-          why_needed: { type: "string" as const },
+          mcpPackage: { type: "string" as const },
+          whyNeeded: { type: "string" as const },
           score: { type: "number" as const },
           alternatives: {
             type: "array" as const,
@@ -224,11 +224,11 @@ export const ResearchResultSchema = {
         },
       },
     },
-    model_recommendation: {
+    modelRecommendation: {
       type: "object" as const,
       properties: {
-        executor_complex: { type: "string" as const },
-        executor_routine: { type: "string" as const },
+        executorComplex: { type: "string" as const },
+        executorRoutine: { type: "string" as const },
         reasoning: { type: "string" as const },
       },
     },
@@ -236,7 +236,7 @@ export const ResearchResultSchema = {
       type: "array" as const,
       items: { type: "string" as const },
     },
-    estimated_complexity: { type: "string" as const },
+    estimatedComplexity: { type: "string" as const },
   },
   required: ["stack", "connections"] as const,
 };

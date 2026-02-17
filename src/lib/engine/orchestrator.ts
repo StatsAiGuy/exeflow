@@ -2,6 +2,8 @@ import { getDb, withRetry } from "@/lib/db";
 import { generateId } from "@/lib/utils/id";
 import { eventBus } from "@/lib/events/emitter";
 import { detectLoop } from "@/lib/quality/loop-detector";
+import { detectChurn } from "@/lib/quality/churn-detector";
+import { verifyAgentActions, parseAgentClaims } from "@/lib/quality/action-verifier";
 import { spawnAgent } from "@/lib/claude/sdk";
 import { getModelForRole, resolveModelShorthand } from "./model-delegator";
 import {
@@ -12,7 +14,7 @@ import {
 } from "./loop-controller";
 import { startChatBridge, stopChatBridge } from "./chat-bridge";
 import { startNotificationBridge, stopNotificationBridge } from "@/lib/notifications/bridge";
-import { createCheckpoint, getPendingCheckpoints } from "./checkpoint";
+import { createCheckpoint } from "./checkpoint";
 import {
   buildLeadAgentPrompt,
   buildExecutorPrompt,
@@ -141,6 +143,16 @@ export class Orchestrator {
         break;
       }
 
+      // Check for file churn (same files modified 3+ times)
+      const churnResult = detectChurn(this.project.id);
+      if (churnResult.hasChurn) {
+        const churnFiles = churnResult.churningFiles.map((f) => `${f.filePath} (${f.modifyCount}x)`).join(", ");
+        eventBus.emit("warning", this.project.id, {
+          type: "churn_detected",
+          message: `File churn detected: ${churnFiles}`,
+        });
+      }
+
       // Invoke lead agent to decide next action
       const decision = await this.invokeLeadAgent(state);
       if (!decision) {
@@ -156,6 +168,22 @@ export class Orchestrator {
   private async invokeLeadAgent(state: ReturnType<typeof getLoopState> & object): Promise<LeadDecision | null> {
     const contextJson = state.contextJson ? JSON.parse(state.contextJson) : {};
     contextJson.cycleNumber = state.cycleNumber;
+
+    // Check for unprocessed user messages from chat
+    const db = getDb();
+    const recentUserMsg = db.prepare(
+      `SELECT content FROM chat_messages
+       WHERE project_id = ? AND role = 'user'
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(this.project.id) as { content: string } | undefined;
+
+    if (recentUserMsg && !contextJson.userMessage) {
+      contextJson.userMessage = recentUserMsg.content;
+      if (!contextJson.invocationTrigger) {
+        contextJson.invocationTrigger = "USER_MESSAGE";
+      }
+    }
+
     const prompt = buildLeadAgentPrompt(this.project, state.planJson, contextJson);
 
     const result = await spawnAgent({
@@ -264,6 +292,18 @@ export class Orchestrator {
 
     // Record phase result
     this.recordPhaseResult(phase, decision.task_description || "", result);
+
+    // Post-phase verification: check agent claims against actual actions
+    if (phase === "execute" && result.status === "completed" && result.output) {
+      const claims = parseAgentClaims(result.output);
+      const verification = verifyAgentActions(result.agentId, claims);
+      if (!verification.verified) {
+        eventBus.emit("warning", this.project.id, {
+          type: "hallucination_detected",
+          hallucinations: verification.hallucinations,
+        });
+      }
+    }
 
     // Build outcome context including error details when applicable
     const outcomeContext: Record<string, unknown> = {

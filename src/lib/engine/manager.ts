@@ -1,4 +1,5 @@
 import { getProject } from "@/lib/projects/manager";
+import { getDb } from "@/lib/db";
 import { Orchestrator } from "./orchestrator";
 import { startLoop, pauseLoop, resumeLoop, stopLoop, getLoopState } from "./loop-controller";
 import { scaffoldProject, installECC } from "@/lib/projects/scaffolder";
@@ -50,13 +51,21 @@ export async function startProject(projectId: string): Promise<{ success: boolea
     }
   }
 
+  // Load existing plan from DB if available
+  const db = getDb();
+  const existingPlan = db.prepare(
+    `SELECT content FROM plans WHERE project_id = ? AND status IN ('approved', 'active', 'draft')
+     ORDER BY version DESC LIMIT 1`,
+  ).get(projectId) as { content: string } | undefined;
+  const planJson = existingPlan?.content || "{}";
+
   // Initialize the loop state
   startLoop(projectId);
 
   // Create and start the orchestrator (runs async)
   const orchestrator = new Orchestrator({
     project,
-    planJson: "{}",
+    planJson,
     onStateChange: (state) => {
       eventBus.emit("orchestrator_state_changed", projectId, { state });
     },

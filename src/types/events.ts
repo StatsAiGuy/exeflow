@@ -25,6 +25,7 @@ export type EventType =
   | "tool_call"
   | "tool_progress"
   | "error"
+  | "warning"
   | "milestone_completed"
   | "notification"
   | "orchestrator_state_changed";

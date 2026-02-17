@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { initializeDb, getDb } from "@/lib/db";
+import { answerCheckpoint } from "@/lib/engine/checkpoint";
+import { resumeProject } from "@/lib/engine/manager";
 
 export async function GET(
   request: Request,
@@ -36,24 +38,51 @@ export async function PUT(
 ) {
   try {
     initializeDb();
-    await params;
-    const db = getDb();
+    const { projectId } = await params;
     const body = await request.json();
 
-    const { checkpointId, response } = body;
+    // Accept both frontend format (action + reason) and direct response format
+    const { checkpointId, action, reason, response } = body;
 
-    if (!checkpointId || !response) {
+    if (!checkpointId) {
       return NextResponse.json(
-        { error: "checkpointId and response are required" },
+        { error: "checkpointId is required" },
         { status: 400 },
       );
     }
 
-    db.prepare(
-      `UPDATE checkpoints SET response = ?, status = 'answered', answered_at = datetime('now') WHERE id = ?`,
-    ).run(response, checkpointId);
+    // Build the response string from the action/reason or direct response
+    let responseText: string;
+    if (response) {
+      responseText = response;
+    } else if (action === "approve") {
+      responseText = reason ? `Approved: ${reason}` : "Approved";
+    } else if (action === "reject") {
+      responseText = `REJECTED: ${reason || "No reason provided"}`;
+    } else if (action === "edit") {
+      responseText = reason || "User provided edits";
+    } else {
+      responseText = reason || action || "Acknowledged";
+    }
 
-    return NextResponse.json({ status: "answered" });
+    // Use the proper answerCheckpoint function (updates DB + emits events)
+    const checkpoint = answerCheckpoint(checkpointId, responseText);
+    if (!checkpoint) {
+      return NextResponse.json(
+        { error: "Checkpoint not found" },
+        { status: 404 },
+      );
+    }
+
+    // Auto-resume the project after answering a checkpoint
+    // The orchestrator is paused at paused_awaiting_input and needs to restart
+    const db = getDb();
+    const project = db.prepare("SELECT status FROM projects WHERE id = ?").get(projectId) as { status: string } | undefined;
+    if (project?.status === "paused") {
+      await resumeProject(projectId);
+    }
+
+    return NextResponse.json({ status: "answered", checkpoint });
   } catch (error) {
     console.error("Failed to answer checkpoint:", error);
     return NextResponse.json(

@@ -50,7 +50,7 @@ describe("output schemas", () => {
     expect(ResearchResultSchema.properties).toHaveProperty("stack");
     expect(ResearchResultSchema.properties).toHaveProperty("connections");
     expect(ResearchResultSchema.properties).toHaveProperty(
-      "model_recommendation",
+      "modelRecommendation",
     );
     expect(ResearchResultSchema.required).toContain("stack");
   });

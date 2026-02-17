@@ -13,6 +13,16 @@ import { generateId } from "@/lib/utils/id";
 import { eventBus } from "@/lib/events/emitter";
 import { enforceExeflowPermissions } from "./permissions";
 import { getExeflowMcpServer } from "./mcp-server";
+import { recordAction } from "@/lib/quality/action-verifier";
+import { CircuitBreaker } from "@/lib/resilience/circuit-breaker";
+import { checkDiskSpace } from "@/lib/system/disk";
+
+// Circuit breaker for agent spawning — prevents cascading failures
+const agentCircuitBreaker = new CircuitBreaker("agent-spawner", {
+  failureThreshold: 5,
+  resetTimeout: 60000,
+  windowSize: 300000,
+});
 
 export interface SdkSession {
   agentId: string;
@@ -86,6 +96,16 @@ export async function spawnAgent(
   });
 
   try {
+    // Pre-flight checks: disk space and circuit breaker
+    const diskCheck = checkDiskSpace();
+    if (diskCheck.status === "critical") {
+      throw new Error(`Disk space critical (${diskCheck.freeMB}MB free). Cannot spawn agent.`);
+    }
+
+    if (!agentCircuitBreaker.canExecute()) {
+      throw new Error("Agent circuit breaker is open — too many recent failures. Waiting for recovery.");
+    }
+
     // Build MCP server config merging project MCPs + exeflow internal MCP
     const mcpServers: Record<string, SdkMcpServerConfig> = {};
 
@@ -277,6 +297,9 @@ export async function spawnAgent(
       agentId,
     );
 
+    // Record circuit breaker success
+    agentCircuitBreaker.recordSuccess();
+
     eventBus.emit("agent_completed", options.projectId, {
       agentId,
       role: options.role,
@@ -290,6 +313,8 @@ export async function spawnAgent(
 
     return result;
   } catch (error) {
+    // Record circuit breaker failure
+    agentCircuitBreaker.recordFailure();
     const errMsg = error instanceof Error ? error.message : String(error);
 
     db.prepare(
@@ -387,6 +412,14 @@ function handleAssistantMessage(
         projectId,
         block.name,
         JSON.stringify(block.input).slice(0, 500),
+      );
+
+      // Record in agent_actions for hallucination verification
+      recordAction(
+        agentId,
+        projectId,
+        block.name,
+        block.input as Record<string, unknown>,
       );
 
       eventBus.emit("tool_call", projectId, {
