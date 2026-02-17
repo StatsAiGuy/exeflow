@@ -2,7 +2,7 @@
 
 import { use } from "react";
 import { Header } from "@/components/layout/header";
-import { Card, CardContent } from "@/components/ui/card";
+import { PlanTree } from "@/components/plan/plan-tree";
 
 export default function PlanPage({
   params,
@@ -15,13 +15,7 @@ export default function PlanPage({
     <div className="flex flex-col">
       <Header title="Plan Board" />
       <div className="p-6">
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Plan board with tree view and DAG visualization will be built here.
-            <br />
-            Project: {projectId}
-          </CardContent>
-        </Card>
+        <PlanTree projectId={projectId} />
       </div>
     </div>
   );

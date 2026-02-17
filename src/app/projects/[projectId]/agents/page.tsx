@@ -2,7 +2,8 @@
 
 import { use } from "react";
 import { Header } from "@/components/layout/header";
-import { Card, CardContent } from "@/components/ui/card";
+import { AgentList } from "@/components/agents/agent-list";
+import { ModelUsage } from "@/components/agents/model-usage";
 
 export default function AgentsPage({
   params,
@@ -14,14 +15,15 @@ export default function AgentsPage({
   return (
     <div className="flex flex-col">
       <Header title="Agents" />
-      <div className="p-6">
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Agent orchestration graph and execution timeline will be built here.
-            <br />
-            Project: {projectId}
-          </CardContent>
-        </Card>
+      <div className="space-y-6 p-6">
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <AgentList projectId={projectId} />
+          </div>
+          <div>
+            <ModelUsage projectId={projectId} />
+          </div>
+        </div>
       </div>
     </div>
   );
