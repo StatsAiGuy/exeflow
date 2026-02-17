@@ -102,8 +102,30 @@ export function updateProject(id: string, input: UpdateProjectInput): Project | 
 
 export function deleteProject(id: string): boolean {
   const db = getDb();
-  const result = db.prepare("DELETE FROM projects WHERE id = ?").run(id);
-  return result.changes > 0;
+  // Delete related records first (FK constraints enforced)
+  const deleteRelated = db.transaction(() => {
+    db.prepare("DELETE FROM error_log WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM notifications WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM mcp_health WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM agent_actions WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM phase_history WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM chat_messages WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM events WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM checkpoints WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM connections WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM tool_calls WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM task_dependencies WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)").run(id);
+    db.prepare("DELETE FROM tasks WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM execution_cycles WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM milestones WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM research_docs WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM plans WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM orchestrator_state WHERE project_id = ?").run(id);
+    const result = db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    return result.changes > 0;
+  });
+  return deleteRelated();
 }
 
 interface ProjectRow {
