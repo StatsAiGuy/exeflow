@@ -12,12 +12,15 @@ export interface ExeflowConfig {
   };
   notifications?: {
     discord?: {
-      enabled: boolean;
-      webhookUrl: string;
+      mode: "bot" | "webhook" | "off";
+      webhookUrl?: string;
+      botToken?: string;
+      guildId?: string;
+      dmUserId?: string;
     };
     slack?: {
       enabled: boolean;
-      webhookUrl: string;
+      webhookUrl?: string;
     };
   };
   preferences?: {

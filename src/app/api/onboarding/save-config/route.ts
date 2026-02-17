@@ -36,8 +36,8 @@ export async function POST(request: Request) {
     if (notifications) {
       config.notifications = {
         discord: {
-          enabled: !!notifications.discordWebhook,
-          webhookUrl: notifications.discordWebhook || "",
+          mode: notifications.discordWebhook ? "webhook" as const : "off" as const,
+          webhookUrl: notifications.discordWebhook || undefined,
         },
         slack: {
           enabled: !!notifications.slackWebhook,

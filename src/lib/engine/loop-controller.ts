@@ -108,9 +108,9 @@ export function stopLoop(projectId: string): void {
   db.prepare("UPDATE projects SET status = 'stopped', updated_at = datetime('now') WHERE id = ?").run(projectId);
 }
 
-export function completeLoop(projectId: string): void {
+export function completeLoop(projectId: string, summary?: string): void {
   setLoopState(projectId, "completed");
-  eventBus.emit("project_completed", projectId, {});
+  eventBus.emit("project_completed", projectId, { summary: summary || "" });
 
   const db = getDb();
   db.prepare("UPDATE projects SET status = 'complete', updated_at = datetime('now') WHERE id = ?").run(projectId);

@@ -11,6 +11,7 @@ import {
   completeLoop,
 } from "./loop-controller";
 import { startChatBridge, stopChatBridge } from "./chat-bridge";
+import { startNotificationBridge, stopNotificationBridge } from "@/lib/notifications/bridge";
 import { createCheckpoint, getPendingCheckpoints } from "./checkpoint";
 import {
   buildLeadAgentPrompt,
@@ -84,6 +85,9 @@ export class Orchestrator {
     // Start chat bridge so agent activity appears in the chat panel
     startChatBridge();
 
+    // Start notification bridge so events route to Discord/Slack/Web
+    await startNotificationBridge();
+
     // Check for existing state (session recovery)
     let loopState = getLoopState(this.project.id);
     if (!loopState) {
@@ -111,6 +115,7 @@ export class Orchestrator {
     this.running = false;
     this.abortController.abort();
     stopChatBridge();
+    stopNotificationBridge();
   }
 
   private async runLoop(): Promise<void> {
@@ -336,9 +341,14 @@ export class Orchestrator {
 
   private handleComplete(decision: LeadDecision): void {
     if (decision.completion_scope === "project") {
-      completeLoop(this.project.id);
+      completeLoop(this.project.id, decision.summary);
     } else {
-      // Milestone complete — set context so lead agent can trigger propose
+      // Milestone complete — emit milestone event and set context for propose
+      eventBus.emit("milestone_completed", this.project.id, {
+        title: decision.summary || "Milestone completed",
+        nextMilestoneId: decision.next_milestone_id,
+      });
+
       setLoopState(this.project.id, "checkpoint", {
         contextJson: JSON.stringify({
           lastPhase: "complete_milestone",
@@ -398,8 +408,16 @@ export class Orchestrator {
       const nextCycle = state.cycleNumber + 1;
 
       if (output.project_complete) {
-        completeLoop(this.project.id);
+        completeLoop(this.project.id, (output.completion_reasoning as string) || (output.summary as string) || "Project completed");
       } else {
+        // Emit milestone completion event if applicable
+        if (output.milestone_complete) {
+          eventBus.emit("milestone_completed", this.project.id, {
+            title: (output.next_milestone_title as string) || "Milestone completed",
+            nextMilestoneId: output.next_milestone_id,
+          });
+        }
+
         setLoopState(this.project.id, "checkpoint", {
           cycleNumber: nextCycle,
           contextJson: JSON.stringify({
