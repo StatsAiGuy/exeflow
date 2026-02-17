@@ -216,7 +216,7 @@ export default function ProjectOverviewPage({
       </div>
 
       {/* Chat Panel */}
-      <ChatPanel projectId={projectId} />
+      <ChatPanel />
     </div>
   );
 }
