@@ -20,7 +20,8 @@ export type EventType =
   | "tool_call"
   | "error"
   | "milestone_completed"
-  | "notification";
+  | "notification"
+  | "orchestrator_state_changed";
 
 export interface ExeflowEvent {
   id: number;

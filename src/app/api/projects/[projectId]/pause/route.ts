@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { initializeDb } from "@/lib/db";
-import { pauseLoop } from "@/lib/engine/loop-controller";
+import { pauseProject } from "@/lib/engine/manager";
 
 export async function POST(
   request: Request,
@@ -9,10 +9,10 @@ export async function POST(
   try {
     initializeDb();
     const { projectId } = await params;
-    pauseLoop(projectId);
+    pauseProject(projectId);
     return NextResponse.json({ status: "paused" });
   } catch (error) {
-    console.error("Failed to pause loop:", error);
+    console.error("Failed to pause:", error);
     return NextResponse.json(
       { error: "Failed to pause execution loop" },
       { status: 500 },

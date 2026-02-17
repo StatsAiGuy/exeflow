@@ -11,7 +11,7 @@ export async function GET(
     const db = getDb();
 
     const agents = db
-      .prepare("SELECT * FROM agents WHERE project_id = ? ORDER BY created_at DESC")
+      .prepare("SELECT * FROM agents WHERE project_id = ? ORDER BY started_at DESC")
       .all(projectId);
 
     return NextResponse.json(agents);
